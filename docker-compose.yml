@@ -1,0 +1,112 @@
+version: '3.8'
+
+services:
+  # MySQL数据库
+  mysql:
+    image: mysql:8.0
+    container_name: notification-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: password
+      MYSQL_DATABASE: notification_center
+      MYSQL_USER: notification
+      MYSQL_PASSWORD: notification123
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./mysql/init:/docker-entrypoint-initdb.d
+    ports:
+      - "3306:3306"
+    networks:
+      - tool-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # 通知服务
+  notification-center:
+    build: ./notification-center
+    container_name: notification-center
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=mysql+aiomysql://notification:notification123@mysql:3306/notification_center?charset=utf8mb4
+      - SMTP_HOST=${SMTP_HOST}
+      - SMTP_PORT=${SMTP_PORT}
+      - SMTP_USERNAME=${SMTP_USERNAME}
+      - SMTP_PASSWORD=${SMTP_PASSWORD}
+      - WECHAT_WEBHOOK_URL=${WECHAT_WEBHOOK_URL}
+      - FEISHU_WEBHOOK_URL=${FEISHU_WEBHOOK_URL}
+    volumes:
+      - ./notification-center/logs:/app/logs
+      - ./notification-center/config:/app/config
+    networks:
+      - tool-network
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # 投资分析工具
+  investment-analyzer:
+    build: ./investment_analyzer
+    container_name: investment-analyzer
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./investment_analyzer/data:/app/data
+      - ./investment_analyzer/reports:/app/reports
+      - ./investment_analyzer/logs:/app/logs
+    networks:
+      - tool-network
+    restart: unless-stopped
+    depends_on:
+      - notification-center
+    environment:
+      - NOTIFICATION_SERVICE_URL=http://notification-center:8000
+
+  # 北京车牌许可工具
+  beijing-permit:
+    build: ./beijing_permit
+    container_name: beijing-permit
+    volumes:
+      - ./beijing_permit/logs:/app/logs
+    networks:
+      - tool-network
+    restart: unless-stopped
+    environment:
+      - DISPLAY=99
+    depends_on:
+      - notification-center
+
+  # 添加一个简单的proxy服务用于统一访问
+  nginx-proxy:
+    image: nginx:alpine
+    container_name: nginx-proxy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+    networks:
+      - tool-network
+    restart: unless-stopped
+    depends_on:
+      - notification-center
+      - investment-analyzer
+
+networks:
+  tool-network:
+    driver: bridge
+
+# 持久化数据卷
+volumes:
+  mysql_data:
+    driver: local
